@@ -14,6 +14,7 @@
 - (id) init {
     if (self = [super init]) {
         addressBook = ABAddressBookCreate();
+        parsingString = NO;
     }
     
     return self;
@@ -24,12 +25,30 @@
     [super dealloc];
 }
 
+
+- (ABRecordRef) parseWithString : (NSString *)infoStr
+{
+    NSArray *lines = [infoStr componentsSeparatedByString:@"\n"];
+    parsingString = YES;
+    
+    for(NSString* line in lines) {
+        [self parseLine:line];
+    }
+    
+    return personRecord;
+}
+
 - (void)parse {
     [self emptyAddressBook];
     
     NSString *filename = [[NSBundle mainBundle] pathForResource:@"vCards" ofType:@"vcf"];
-    NSLog(@"openning file %@", filename);
+    NSLog(@"opening file %@", filename);
     NSData *stringData = [NSData dataWithContentsOfFile:filename];
+    
+    if (stringData == nil)
+    {
+        // NO data available.
+    }
     NSString *vcardString = [[NSString alloc] initWithData:stringData encoding:NSUTF8StringEncoding];
     
     
@@ -44,6 +63,77 @@
     [vcardString release];
 }
 
+- (void) parseItem: (ABPropertyID) propID : (NSString *)line {
+    NSArray *upperComponents = [line componentsSeparatedByString:@":"];
+    ABRecordSetValue (personRecord, propID,[upperComponents objectAtIndex:1], NULL);
+}
+
+- (void) parseVersion: (NSString *)line {
+    NSArray *upperComponents = [line componentsSeparatedByString:@":"];
+    version = [[upperComponents objectAtIndex:1] floatValue];
+}
+
+// Each version is different:
+// 2.1   TEL;WORK;VOICE:(111) 555-1212
+// 3.0   TEL;TYPE=WORK,VOICE:(111) 555-1212
+// 4.0   TEL;TYPE="work,voice";VALUE=uri:tel:+1-111-555-1212
+//
+// 
+- (void) parsePhone:(NSString *)line {
+    NSArray *mainComponents = [line componentsSeparatedByString:@":"];
+    NSString *phoneNumber = [mainComponents lastObject];
+    CFStringRef label;
+    ABMutableMultiValueRef multiPhone;
+    
+    if ([line rangeOfString:@"WORK"].location != NSNotFound) {
+        label = kABWorkLabel;
+    } else if ([line rangeOfString:@"HOME"].location != NSNotFound) {
+        label = kABHomeLabel;
+    } else {
+        label = kABPersonPhoneMainLabel;
+    }
+    
+    ABMultiValueRef immutableMultiPhone = ABRecordCopyValue(personRecord, kABPersonPhoneProperty);
+    if (immutableMultiPhone) {
+        multiPhone = ABMultiValueCreateMutableCopy(immutableMultiPhone);
+    } else {
+        multiPhone = ABMultiValueCreateMutable(kABMultiStringPropertyType);
+    }
+    ABMultiValueAddValueAndLabel(multiPhone, phoneNumber, label, NULL);
+    ABRecordSetValue(personRecord, kABPersonPhoneProperty, multiPhone,nil);
+    
+    CFRelease(multiPhone);
+    if (immutableMultiPhone) {
+        CFRelease(immutableMultiPhone);
+    }
+    
+}
+
+- (void) parseURL:(NSString *)line {
+    NSArray *mainComponents = [line componentsSeparatedByString:@":"];
+    // Everything but the first components
+    NSString *firstPart = [mainComponents objectAtIndex:0];
+    NSString *urlAddr = [line substringFromIndex:firstPart.length+1];
+    
+    ABMutableMultiValueRef multiValue;
+    
+    ABMultiValueRef immutableMultiURL = ABRecordCopyValue(personRecord, kABPersonURLProperty);
+    if (immutableMultiURL) {
+        multiValue = ABMultiValueCreateMutableCopy(immutableMultiURL);
+    } else {
+        multiValue = ABMultiValueCreateMutable(kABMultiStringPropertyType);
+    }
+    ABMultiValueAddValueAndLabel(multiValue, urlAddr, kABPersonHomePageLabel, NULL);
+    ABRecordSetValue(personRecord, kABPersonURLProperty, multiValue, nil);
+    
+    CFRelease(multiValue);
+    if (immutableMultiURL) {
+        CFRelease(immutableMultiURL);
+    }
+    
+}
+
+
 - (void) parseLine:(NSString *)line {
     if (base64image && [line hasPrefix:@"  "]) {
         NSString *trimmedLine = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -54,9 +144,25 @@
     } else if ([line hasPrefix:@"BEGIN"]) {
         personRecord = ABPersonCreate();
     } else if ([line hasPrefix:@"END"]) {
-        ABAddressBookAddRecord(addressBook,personRecord, NULL);
+        if (parsingString == NO)
+            ABAddressBookAddRecord(addressBook, personRecord, NULL);
+    } else if ([line hasPrefix:@"VERSION:"]) {
+        [self parseVersion:line];
     } else if ([line hasPrefix:@"N:"]) {
         [self parseName:line];
+        
+        
+    } else if ([line hasPrefix:@"ORG:"]) {
+        [self parseItem: kABPersonOrganizationProperty :line];
+    } else if ([line hasPrefix:@"TITLE:"]) {
+        [self parseItem: kABPersonJobTitleProperty :line];
+        
+    } else if ([line hasPrefix:@"URL:"]) {
+        [self parseURL :line];
+        
+        
+    } else if ([line hasPrefix:@"TEL;"]) {
+        [self parsePhone:line];
     } else if ([line hasPrefix:@"EMAIL;"]) {
         [self parseEmail:line];
     } else if ([line hasPrefix:@"PHOTO;BASE64"]) {
@@ -64,11 +170,19 @@
     }
 }
 
+
 - (void) parseName:(NSString *)line {
     NSArray *upperComponents = [line componentsSeparatedByString:@":"];
     NSArray *components = [[upperComponents objectAtIndex:1] componentsSeparatedByString:@";"];
+    if (components.count==1)
+    {
+        components = [[upperComponents objectAtIndex:1] componentsSeparatedByString:@" "];
+    }
+    
     ABRecordSetValue (personRecord, kABPersonLastNameProperty,[components objectAtIndex:0], NULL);
+    if (components.count>1)
     ABRecordSetValue (personRecord, kABPersonFirstNameProperty,[components objectAtIndex:1], NULL);
+    if (components.count>3)
     ABRecordSetValue (personRecord, kABPersonPrefixProperty,[components objectAtIndex:3], NULL);
 }
 
